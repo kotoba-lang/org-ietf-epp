@@ -1,0 +1,268 @@
+(ns epp.roundtrip-test
+  "End-to-end: real EPP frames in, registry state and real EPP frames out.
+
+  The fixtures are the example frames from RFC 5730/5731/3915 rather than
+  frames this library generated. A parser tested only against its own emitter
+  agrees with itself and with nobody else."
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
+            [epp.command :as command]
+            [epp.server :as server]
+            [epp.transport :as transport]
+            [epp.xmlns :as xmlns]
+            [srs.core :as srs]
+            [srs.time :as t]))
+
+(def t0 (t/civil->ms {:year 2024 :month 1 :day 15 :ms-of-day 0}))
+(defn d+ [n] (t/plus-days t0 n))
+
+(defn- cmd [xml] (command/parse (xmlns/parse xml)))
+
+;; ── RFC 5731 §3.2.1, verbatim ─────────────────────────────────────────────
+
+(def create-frame
+  "<?xml version='1.0' encoding='UTF-8' standalone='no'?>
+   <epp xmlns='urn:ietf:params:xml:ns:epp-1.0'>
+     <command>
+       <create>
+         <domain:create xmlns:domain='urn:ietf:params:xml:ns:domain-1.0'>
+           <domain:name>example.com</domain:name>
+           <domain:period unit='y'>2</domain:period>
+           <domain:ns>
+             <domain:hostObj>ns1.example.net</domain:hostObj>
+             <domain:hostObj>ns2.example.net</domain:hostObj>
+           </domain:ns>
+           <domain:registrant>jd1234</domain:registrant>
+           <domain:authInfo><domain:pw>2fooBAR</domain:pw></domain:authInfo>
+         </domain:create>
+       </create>
+       <clTRID>ABC-12345</clTRID>
+     </command>
+   </epp>")
+
+(deftest rfc-5731-create-parses-into-an-srs-command
+  (let [c (cmd create-frame)]
+    (is (= :domain/create (:command/kind c)))
+    (is (= "example.com" (:command/name c)))
+    (is (= 2 (:years c)))
+    (is (= ["ns1.example.net" "ns2.example.net"] (:nameservers c)))
+    (is (= "jd1234" (:registrant c)))
+    (is (= "2fooBAR" (:auth-info c)))
+    (is (= "ABC-12345" (:command/tx-id c)))))
+
+(deftest rfc-5731-renew-carries-the-current-expiry-as-a-date
+  (let [c (cmd "<epp xmlns='urn:ietf:params:xml:ns:epp-1.0'><command><renew>
+                  <domain:renew xmlns:domain='urn:ietf:params:xml:ns:domain-1.0'>
+                    <domain:name>example.com</domain:name>
+                    <domain:curExpDate>2000-04-03</domain:curExpDate>
+                    <domain:period unit='y'>5</domain:period>
+                  </domain:renew></renew><clTRID>ABC-12346</clTRID></command></epp>")]
+    (is (= :domain/renew (:command/kind c)))
+    (is (= 5 (:years c)))
+    (is (= (t/parse-date "2000-04-03") (:current-expires-at c)))))
+
+(deftest a-month-period-is-refused-with-a-reason-rather-than-rounded
+  (let [c (cmd "<epp xmlns='urn:ietf:params:xml:ns:epp-1.0'><command><create>
+                  <domain:create xmlns:domain='urn:ietf:params:xml:ns:domain-1.0'>
+                    <domain:name>example.com</domain:name>
+                    <domain:period unit='m'>18</domain:period>
+                  </domain:create></create></command></epp>")]
+    (is (= 2306 (get-in c [:error :error/code])))
+    (is (str/includes? (get-in c [:error :error/message]) "whole years"))))
+
+(deftest the-transfer-op-is-read-from-the-core-element
+  (doseq [[op kind] {"request" :domain/transfer-request
+                     "approve" :domain/transfer-approve
+                     "reject"  :domain/transfer-reject
+                     "cancel"  :domain/transfer-cancel}]
+    (is (= kind (:command/kind
+                 (cmd (str "<epp xmlns='urn:ietf:params:xml:ns:epp-1.0'><command>
+                              <transfer op='" op "'>
+                                <domain:transfer xmlns:domain='urn:ietf:params:xml:ns:domain-1.0'>
+                                  <domain:name>example.com</domain:name>
+                                  <domain:authInfo><domain:pw>2fooBAR</domain:pw></domain:authInfo>
+                                </domain:transfer></transfer></command></epp>")))))))
+
+(deftest rgp-restore-is-an-update-carrying-an-extension
+  (testing "request"
+    (is (= :domain/restore
+           (:command/kind
+            (cmd "<epp xmlns='urn:ietf:params:xml:ns:epp-1.0'><command><update>
+                    <domain:update xmlns:domain='urn:ietf:params:xml:ns:domain-1.0'>
+                      <domain:name>example.com</domain:name></domain:update></update>
+                  <extension><rgp:update xmlns:rgp='urn:ietf:params:xml:ns:rgp-1.0'>
+                    <rgp:restore op='request'/></rgp:update></extension>
+                  <clTRID>ABC-12349</clTRID></command></epp>")))))
+  (testing "report"
+    (is (= :domain/restore-report
+           (:command/kind
+            (cmd "<epp xmlns='urn:ietf:params:xml:ns:epp-1.0'><command><update>
+                    <domain:update xmlns:domain='urn:ietf:params:xml:ns:domain-1.0'>
+                      <domain:name>example.com</domain:name></domain:update></update>
+                  <extension><rgp:update xmlns:rgp='urn:ietf:params:xml:ns:rgp-1.0'>
+                    <rgp:restore op='report'/></rgp:update></extension></command></epp>")))))
+  (testing "a plain update with no extension stays an update"
+    (is (= :domain/update
+           (:command/kind
+            (cmd "<epp xmlns='urn:ietf:params:xml:ns:epp-1.0'><command><update>
+                    <domain:update xmlns:domain='urn:ietf:params:xml:ns:domain-1.0'>
+                      <domain:name>example.com</domain:name>
+                      <domain:add><domain:status s='clientHold'/></domain:add>
+                    </domain:update></update></command></epp>"))))))
+
+;; ── session ───────────────────────────────────────────────────────────────
+
+(def login-frame
+  "<epp xmlns='urn:ietf:params:xml:ns:epp-1.0'><command><login>
+     <clID>reg-a</clID><pw>secret</pw>
+     <options><version>1.0</version><lang>en</lang></options>
+     <svcs><objURI>urn:ietf:params:xml:ns:domain-1.0</objURI></svcs>
+   </login><clTRID>LOGIN-1</clTRID></command></epp>")
+
+(defn- auth [id pw] (and (= id "reg-a") (= pw "secret")))
+
+(defn- run
+  "Drive a session through a sequence of frames, returning the final state and
+  every response. This is the whole server loop minus the socket."
+  [frames & [{:keys [authenticate registry now]}]]
+  (reduce (fn [{:keys [session registry responses events]} f]
+            (let [r (server/handle session registry f (or now t0)
+                                   {:authenticate (or authenticate auth)})]
+              {:session (:session r) :registry (:registry r)
+               :responses (conj responses (:response r))
+               :events (into events (:events r))}))
+          {:session (server/new-session {:server-id "test"})
+           :registry (or registry (srs/empty-registry "com"))
+           :responses [] :events []}
+          frames))
+
+(defn- code-of [xml]
+  (second (re-find #"<result code=\"(\d+)\"" xml)))
+
+(deftest commands-before-login-are-a-use-error-not-an-auth-error
+  (let [r (run [create-frame])]
+    (is (= "2002" (code-of (first (:responses r)))))
+    (is (nil? (srs/domain (:registry r) "example.com")))))
+
+(deftest a-full-session-registers-a-domain
+  (let [r (run [login-frame create-frame])]
+    (is (= "1000" (code-of (first (:responses r)))))
+    (is (= "1000" (code-of (second (:responses r)))))
+    (is (some? (srs/domain (:registry r) "example.com")))
+    (is (= [:domain/created] (mapv :event/kind (:events r))))
+    (testing "the response echoes the client transaction id"
+      (is (str/includes? (second (:responses r)) "<clTRID>ABC-12345</clTRID>")))
+    (testing "and carries the dates the registry actually assigned"
+      (is (str/includes? (second (:responses r))
+                         (str "<domain:exDate>" (t/iso8601 (t/plus-years t0 2))))))))
+
+(deftest the-session-registrar-overrides-whatever-the-frame-claims
+  (let [;; The frame carries no registrar at all; the session supplies it.
+        r (run [login-frame create-frame])
+        d (srs/domain (:registry r) "example.com")]
+    (is (= "reg-a" (:domain/registrar d)))
+    (testing "and a second registrar cannot act on it"
+      (let [r2 (run [(str/replace login-frame "reg-a" "reg-b")
+                     "<epp xmlns='urn:ietf:params:xml:ns:epp-1.0'><command><delete>
+                        <domain:delete xmlns:domain='urn:ietf:params:xml:ns:domain-1.0'>
+                          <domain:name>example.com</domain:name>
+                        </domain:delete></delete><clTRID>DEL-1</clTRID></command></epp>"]
+                    {:authenticate (fn [id pw] (and (= id "reg-b") (= pw "secret")))
+                     :registry (:registry r)})]
+        (is (= "2201" (code-of (second (:responses r2)))))))))
+
+(deftest a-failed-login-closes-the-session
+  (let [r (run [(str/replace login-frame "secret" "wrong")])]
+    (is (= "2501" (code-of (first (:responses r)))))
+    (is (server/closed? (:session r)))))
+
+(deftest login-is-refused-for-an-object-service-the-greeting-did-not-advertise
+  (let [r (run [(str/replace login-frame
+                             "urn:ietf:params:xml:ns:domain-1.0"
+                             "urn:ietf:params:xml:ns:contact-1.0")])]
+    (is (= "2307" (code-of (first (:responses r)))))))
+
+(deftest hello-answers-with-a-greeting-carrying-the-required-dcp
+  (let [r (run ["<epp xmlns='urn:ietf:params:xml:ns:epp-1.0'><hello/></epp>"])
+        g (first (:responses r))]
+    (is (str/includes? g "<greeting>"))
+    (is (str/includes? g "<svID>test</svID>"))
+    (is (str/includes? g "<dcp>") "RFC 5730 §2.4 makes dcp mandatory")
+    (is (str/includes? g "<objURI>urn:ietf:params:xml:ns:domain-1.0</objURI>"))
+    (is (not (str/includes? g "_objs")) "no invented wrapper elements")))
+
+(deftest a-blocked-command-names-the-blocking-status-in-an-extvalue
+  (let [r (run [login-frame create-frame
+                ;; lock it, then try to transfer it
+                "<epp xmlns='urn:ietf:params:xml:ns:epp-1.0'><command><update>
+                   <domain:update xmlns:domain='urn:ietf:params:xml:ns:domain-1.0'>
+                     <domain:name>example.com</domain:name>
+                     <domain:add><domain:status s='clientTransferProhibited'/></domain:add>
+                   </domain:update></update></command></epp>"])
+        after (server/handle (:session r) (:registry r)
+                             "<epp xmlns='urn:ietf:params:xml:ns:epp-1.0'><command>
+                                <transfer op='request'>
+                                  <domain:transfer xmlns:domain='urn:ietf:params:xml:ns:domain-1.0'>
+                                    <domain:name>example.com</domain:name>
+                                    <domain:authInfo><domain:pw>2fooBAR</domain:pw></domain:authInfo>
+                                  </domain:transfer></transfer></command></epp>"
+                             (d+ 90) {:authenticate auth})]
+    (is (= "2304" (code-of (:response after))))
+    (is (str/includes? (:response after) "clientTransferProhibited"))
+    (is (str/includes? (:response after) "<extValue>"))))
+
+(deftest check-distinguishes-taken-from-not-served
+  (let [r (run [login-frame create-frame
+                "<epp xmlns='urn:ietf:params:xml:ns:epp-1.0'><command><check>
+                   <domain:check xmlns:domain='urn:ietf:params:xml:ns:domain-1.0'>
+                     <domain:name>example.com</domain:name>
+                     <domain:name>free.com</domain:name>
+                     <domain:name>example.net</domain:name>
+                   </domain:check></check></command></epp>"])
+        chk (last (:responses r))]
+    (is (str/includes? chk "avail=\"0\""))
+    (is (str/includes? chk "avail=\"1\""))
+    (is (str/includes? chk "In use"))
+    (is (str/includes? chk "Not a name this registry serves"))))
+
+(deftest info-reports-the-projected-statuses-and-never-the-authinfo
+  (let [r (run [login-frame create-frame
+                "<epp xmlns='urn:ietf:params:xml:ns:epp-1.0'><command><info>
+                   <domain:info xmlns:domain='urn:ietf:params:xml:ns:domain-1.0'>
+                     <domain:name>example.com</domain:name>
+                   </domain:info></info></command></epp>"])
+        inf (last (:responses r))]
+    (is (str/includes? inf "<domain:status s=\"addPeriod\"/>"))
+    (is (not (str/includes? inf "2fooBAR"))
+        "the transfer secret must not come back in an info response")))
+
+;; ── transport ─────────────────────────────────────────────────────────────
+
+(deftest the-length-prefix-includes-itself
+  (let [xml "<epp/>"
+        bs (transport/encode xml)]
+    (is (= (count bs) (transport/frame-length bs))
+        "RFC 5734 §4: the declared length counts the four header bytes")
+    (is (= (+ 4 (count xml)) (count bs)))
+    (is (= xml (:frame (transport/decode bs))))))
+
+(deftest the-length-is-in-bytes-not-characters
+  (let [xml "<a>日本語</a>"
+        bs (transport/encode xml)]
+    (is (> (transport/frame-length bs) (+ 4 (count xml)))
+        "UTF-8 makes these multi-byte; a length taken from the string truncates")
+    (is (= xml (:frame (transport/decode bs))))))
+
+(deftest a-partial-frame-waits-and-a-stream-drains
+  (let [a (transport/encode "<one/>")
+        b (transport/encode "<two/>")
+        stream (into a b)]
+    (is (nil? (:frame (transport/decode (subvec (vec a) 0 3)))))
+    (is (nil? (:frame (transport/decode (subvec (vec a) 0 (dec (count a)))))))
+    (let [{:keys [frames rest]} (transport/decode-all stream)]
+      (is (= ["<one/>" "<two/>"] frames))
+      (is (empty? rest)))))
+
+(deftest an-absurd-declared-length-is-refused-before-anything-is-allocated
+  (is (:error (transport/decode [0xff 0xff 0xff 0xff])))
+  (is (:error (transport/decode [0 0 0 2])) "shorter than its own header"))
