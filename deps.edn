@@ -16,4 +16,4 @@
                      "--fail-level" "error"]}
   ;; local checkouts for workspace development (orgs/kotoba-lang/*)
   :dev {:override-deps {io.github.kotoba-lang/xml {:local/root "../xml"}
-                        io.github.kotoba-lang/srs {:git/sha "b239cde4144b925a4cc6a2a9153b7988e41f8681"}}}}}
+                        io.github.kotoba-lang/srs {:local/root "../srs"}}}}}
