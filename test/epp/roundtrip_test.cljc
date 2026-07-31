@@ -266,3 +266,80 @@
 (deftest an-absurd-declared-length-is-refused-before-anything-is-allocated
   (is (:error (transport/decode [0xff 0xff 0xff 0xff])))
   (is (:error (transport/decode [0 0 0 2])) "shorter than its own header"))
+
+;; ── host objects (RFC 5732) ───────────────────────────────────────────────
+
+(deftest rfc-5732-host-create-parses
+  (let [c (cmd "<epp xmlns='urn:ietf:params:xml:ns:epp-1.0'><command><create>
+                  <host:create xmlns:host='urn:ietf:params:xml:ns:host-1.0'>
+                    <host:name>ns1.example.com</host:name>
+                    <host:addr ip='v4'>192.0.2.2</host:addr>
+                    <host:addr ip='v6'>2001:db8::1</host:addr>
+                  </host:create></create><clTRID>ABC-1</clTRID></command></epp>")]
+    (is (= :host/create (:command/kind c)))
+    (is (= "ns1.example.com" (:command/name c)))
+    (is (= [{:address "192.0.2.2" :family :v4}
+            {:address "2001:db8::1" :family :v6}] (:addresses c)))))
+
+(deftest an-address-without-an-ip-attribute-defaults-to-v4-not-a-guess
+  ;; RFC 5732 §4.2 makes v4 the default. Guessing from the string would accept
+  ;; a v6 address sent without the attribute and file it under the wrong
+  ;; family — a malformed frame silently stored as if it were fine.
+  (let [c (cmd "<epp xmlns='urn:ietf:params:xml:ns:epp-1.0'><command><create>
+                  <host:create xmlns:host='urn:ietf:params:xml:ns:host-1.0'>
+                    <host:name>ns1.example.com</host:name>
+                    <host:addr>192.0.2.2</host:addr>
+                  </host:create></create></command></epp>")]
+    (is (= [{:address "192.0.2.2" :family :v4}] (:addresses c))))
+  (let [c (cmd "<epp xmlns='urn:ietf:params:xml:ns:epp-1.0'><command><create>
+                  <host:create xmlns:host='urn:ietf:params:xml:ns:host-1.0'>
+                    <host:name>ns1.example.com</host:name>
+                    <host:addr>2001:db8::1</host:addr>
+                  </host:create></create></command></epp>")]
+    (is (= :v4 (:family (first (:addresses c))))
+        "the frame is malformed; recording what it SAID is better than repairing it silently")))
+
+(deftest the-other-host-commands-route
+  (doseq [[el kind] {"delete" :host/delete "info" :host/info "update" :host/update}]
+    (is (= kind (:command/kind
+                 (cmd (str "<epp xmlns='urn:ietf:params:xml:ns:epp-1.0'><command><" el ">
+                              <host:" el " xmlns:host='urn:ietf:params:xml:ns:host-1.0'>
+                                <host:name>ns1.example.com</host:name>
+                              </host:" el "></" el "></command></epp>"))))))
+  (testing "check takes several names"
+    (is (= ["a.example.com" "b.example.com"]
+           (:command/names
+            (cmd "<epp xmlns='urn:ietf:params:xml:ns:epp-1.0'><command><check>
+                    <host:check xmlns:host='urn:ietf:params:xml:ns:host-1.0'>
+                      <host:name>a.example.com</host:name>
+                      <host:name>b.example.com</host:name>
+                    </host:check></check></command></epp>"))))))
+
+(deftest a-host-update-carries-both-halves-of-the-add-rem-model
+  (let [c (cmd "<epp xmlns='urn:ietf:params:xml:ns:epp-1.0'><command><update>
+                  <host:update xmlns:host='urn:ietf:params:xml:ns:host-1.0'>
+                    <host:name>ns1.example.com</host:name>
+                    <host:add><host:addr ip='v4'>192.0.2.3</host:addr></host:add>
+                    <host:rem><host:status s='clientUpdateProhibited'/></host:rem>
+                  </host:update></update></command></epp>")]
+    (is (= :host/update (:command/kind c)))
+    (is (= ["192.0.2.3"] (:add-addresses c)))
+    (is (= [:clientUpdateProhibited] (:remove-statuses c)))))
+
+(deftest the-greeting-now-advertises-host-1-0-because-it-can-serve-it
+  (let [r (run ["<epp xmlns='urn:ietf:params:xml:ns:epp-1.0'><hello/></epp>"])
+        g (first (:responses r))]
+    (is (str/includes? g "<objURI>urn:ietf:params:xml:ns:host-1.0</objURI>"))
+    (testing "and a login asking for it is accepted rather than 2307"
+      (let [r2 (run [(str/replace login-frame
+                                  "<objURI>urn:ietf:params:xml:ns:domain-1.0</objURI>"
+                                  "<objURI>urn:ietf:params:xml:ns:domain-1.0</objURI><objURI>urn:ietf:params:xml:ns:host-1.0</objURI>")])]
+        (is (= "1000" (code-of (first (:responses r2)))))))))
+
+(deftest an-object-mapping-this-server-does-not-serve-is-still-refused
+  (let [c (cmd "<epp xmlns='urn:ietf:params:xml:ns:epp-1.0'><command><create>
+                  <contact:create xmlns:contact='urn:ietf:params:xml:ns:contact-1.0'>
+                    <contact:id>sh8013</contact:id>
+                  </contact:create></create></command></epp>")]
+    (is (= 2101 (get-in c [:error :error/code])))
+    (is (str/includes? (get-in c [:error :error/message]) "domain and host"))))

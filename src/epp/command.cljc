@@ -169,6 +169,43 @@
 
 ;; ── entry point ───────────────────────────────────────────────────────────
 
+(defn- host-body
+  "The `host-1.0` half of a command element, if present. Checked *after* the
+  domain mapping so a frame carrying both — which is malformed — resolves the
+  same way every time rather than depending on map ordering."
+  [core tag]
+  (xp/find-child core (get {:create :host/create :update :host/update
+                            :delete :host/delete :info :host/info
+                            :check :host/check}
+                           tag)))
+
+(defn- parse-host-create
+  "`<host:create>` (RFC 5732 §3.2.1). Addresses carry an `ip` attribute of
+  `v4`/`v6`; the default when absent is **v4** (§4.2), not \"guess from the
+  string\" — a v6 address sent without the attribute is a malformed frame and
+  guessing would accept it and store it under the wrong family."
+  [body]
+  {:command/kind :host/create
+   :command/name (child-text body :host/name)
+   :addresses (mapv (fn [a]
+                      {:address (text a)
+                       :family (case (or (xp/el-attr a "ip") "v4")
+                                 "v6" :v6 :v4)})
+                    (xp/find-children body :host/addr))})
+
+(defn- parse-host-update [body]
+  (let [add (xp/find-child body :host/add)
+        rem (xp/find-child body :host/rem)
+        chg (xp/find-child body :host/chg)]
+    (cond-> {:command/kind :host/update
+             :command/name (child-text body :host/name)}
+      add (assoc :add-addresses (mapv text (xp/find-children add :host/addr))
+                 :add-statuses (statuses add :host/status))
+      rem (assoc :remove-addresses (mapv text (xp/find-children rem :host/addr))
+                 :remove-statuses (statuses rem :host/status))
+      (and chg (child-text chg :host/name))
+      (assoc :new-name (child-text chg :host/name)))))
+
 (def ^:private object-body
   "Which object-mapping element carries the body of each core command."
   {:create :domain/create
@@ -213,8 +250,20 @@
                 nil     (err 2000 "No recognized command element")
                 ;; Object commands need a body in a namespace we serve.
                 (if (nil? body)
-                  (err 2101 (str "Unsupported object mapping for <"
-                                 (name core-tag) ">; this server serves domain objects"))
+                  ;; No domain mapping — try the host one before refusing, so a
+                  ;; registrar provisioning nameservers is not told the object
+                  ;; class does not exist.
+                  (if-let [hb (host-body core core-tag)]
+                    (case core-tag
+                      :create (parse-host-create hb)
+                      :update (parse-host-update hb)
+                      :delete {:command/kind :host/delete :command/name (child-text hb :host/name)}
+                      :info   {:command/kind :host/info :command/name (child-text hb :host/name)}
+                      :check  {:command/kind :host/check
+                               :command/names (mapv text (xp/find-children hb :host/name))}
+                      (err 2101 (str "<" (name core-tag) "> is not defined for host objects")))
+                    (err 2101 (str "Unsupported object mapping for <"
+                                   (name core-tag) ">; this server serves domain and host objects")))
                   (case core-tag
                     :create (parse-create body)
                     :renew  (parse-renew body)
