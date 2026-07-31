@@ -81,6 +81,12 @@ designing out.
 
 ## Decisions worth knowing about
 
+**A host address with no `ip` attribute is v4, not a guess.** RFC 5732 §4.2
+makes v4 the default. Inferring the family from the string would accept a v6
+address sent without the attribute and file it under the wrong one — a
+malformed frame silently stored as if it were fine. Recording what the frame
+*said* is better than repairing it.
+
 **A month period is refused, not rounded.** `<domain:period unit="m">18</…>` is
 legal EPP. 18 months is not 1 year and is not 2, and a registry that rounds has
 mispriced the registration in someone's disfavour. It comes back as 2306 with a
@@ -160,12 +166,14 @@ Over a socket, wrap it with `epp.transport`:
 - **In:** the domain object mapping (RFC 5731), session management (RFC 5730),
   TCP framing (RFC 5734), the RGP extension (RFC 3915), and `check`/`info`/
   `transfer query`.
-- **Not yet:** host (RFC 5732) and contact (RFC 5733) object mappings — the
-  greeting advertises only `domain-1.0` and a login asking for anything else is
-  refused with 2307 rather than accepted and failed later. Nameservers are plain
-  names on the domain; `<domain:hostAttr>` glue is parsed and carried but there
-  is no host object with its own lifecycle. Also absent: `<poll>` message queue
-  semantics beyond parsing the command, and the secDNS-1.1 extension (see
+- **Also in:** the host object mapping (RFC 5732), backed by `srs.host`. The
+  greeting advertises `host-1.0` *because it can serve it* — a greeting is a
+  contract, and advertising a mapping you cannot serve just means being sent
+  commands you must then refuse.
+- **Not yet:** the contact mapping (RFC 5733); a login asking for `contact-1.0`
+  is refused with 2307 rather than accepted and failed later. Also absent:
+  `<poll>` message queue semantics beyond parsing the command, and the
+  secDNS-1.1 extension (see
   [`org-ietf-dnssec`](https://github.com/kotoba-lang/org-ietf-dnssec)).
 - **Not here:** sockets and TLS. RFC 5734 requires TLS in production; that is the
   deployment's business and this library holds no credentials.
@@ -176,6 +184,6 @@ Over a socket, wrap it with `epp.transport`:
 clojure -M:test
 ```
 
-22 tests / 65 assertions. The command fixtures are the example frames from
+28 tests / 81 assertions. The command fixtures are the example frames from
 RFC 5730/5731/3915 verbatim rather than frames this library generated — a parser
 tested only against its own emitter agrees with itself and with nobody else.

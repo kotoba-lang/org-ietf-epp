@@ -35,7 +35,11 @@
             [srs.core :as srs]))
 
 (def default-objects
-  ["urn:ietf:params:xml:ns:domain-1.0"])
+  ["urn:ietf:params:xml:ns:domain-1.0"
+   ;; Advertised only once srs.host exists to back it. The greeting is a
+   ;; contract — a server that advertises a mapping it cannot serve will be
+   ;; sent commands it must then refuse, which is worse than not offering it.
+   "urn:ietf:params:xml:ns:host-1.0"])
 
 (def default-extensions
   ["urn:ietf:params:xml:ns:rgp-1.0"])

@@ -4,7 +4,7 @@
  ;; protocol is a front end for. Both are .cljc with no third-party deps, so
  ;; this library stays portable.
  :deps {io.github.kotoba-lang/xml {:git/sha "9d4284c733f3fad2b72dc43cd54123ad23fac0ab"}
-        io.github.kotoba-lang/srs {:git/sha "b239cde4144b925a4cc6a2a9153b7988e41f8681"}}
+        io.github.kotoba-lang/srs {:git/sha "1cc77e9f3e79ce75b18837ae10446c04259ac078"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
