@@ -3,7 +3,12 @@
  ;; a zero-dependency parser); kotoba-lang/srs supplies the lifecycle this
  ;; protocol is a front end for. Both are .cljc with no third-party deps, so
  ;; this library stays portable.
- :deps {io.github.kotoba-lang/xml {:git/sha "9d4284c733f3fad2b72dc43cd54123ad23fac0ab"}
+ :deps {
+        ;; kotoba.lang.text, not clojure.string. Pinned as an explicit floor:
+        ;; tools.deps takes the NEWEST sha it is shown, so without a floor here
+        ;; this repo silently rides whatever a sibling happens to name.
+        io.github.kotoba-lang/text {:git/sha "73bdb13ae7a3d004b44bca08be03a3191157a38f"}
+       io.github.kotoba-lang/xml {:git/sha "9d4284c733f3fad2b72dc43cd54123ad23fac0ab"}
         io.github.kotoba-lang/srs {:git/sha "1cc77e9f3e79ce75b18837ae10446c04259ac078"}}
  :aliases
  {:test {:extra-paths ["test"]

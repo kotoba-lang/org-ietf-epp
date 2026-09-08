@@ -28,7 +28,7 @@
   element and its descendants, and an inner declaration shadows an outer one.
   That is why this is a walk with an environment and not a lookup of the root's
   attributes."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [xml.parse :as xp]))
 
 (def uris

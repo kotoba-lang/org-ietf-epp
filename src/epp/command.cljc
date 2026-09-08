@@ -19,7 +19,7 @@
   and `:domain/restore` and `:domain/restore-report` all arrive as the same
   `<update>` element, and this namespace is where they are told apart — which
   is why the extension is read before the update body rather than after."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [srs.time :as t]
             [xml.parse :as xp]))
 
