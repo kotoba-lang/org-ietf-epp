@@ -17,7 +17,7 @@
   stops is asking a server to allocate 4 GiB and wait — the read loop is the
   only place with the information to refuse, and refusing after allocation is
   too late."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (def ^:const header-bytes 4)
 

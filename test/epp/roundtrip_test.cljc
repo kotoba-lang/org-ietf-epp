@@ -4,7 +4,7 @@
   The fixtures are the example frames from RFC 5730/5731/3915 rather than
   frames this library generated. A parser tested only against its own emitter
   agrees with itself and with nobody else."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [clojure.test :refer [deftest is testing]]
             [epp.command :as command]
             [epp.server :as server]
