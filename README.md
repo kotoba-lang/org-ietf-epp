@@ -181,7 +181,7 @@ Over a socket, wrap it with `epp.transport`:
 ## Test
 
 ```
-clojure -M:test
+kbb -M:test
 ```
 
 28 tests / 81 assertions. The command fixtures are the example frames from
